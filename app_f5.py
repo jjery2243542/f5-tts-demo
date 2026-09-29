@@ -48,7 +48,19 @@ TEXT_EXAMPLES = [
     ("\"A census taker once tried to test me...\" - The Silence of the Lambs (1991)", "\"A census taker once tried to test me. I ate his liver with some fava beans and a nice Chianti.\""),
     ("\"One morning I shot an elephant in my pajamas...\" - Animal Crackers (1930)", "\"One morning I shot an elephant in my pajamas. How he got in my pajamas, I don't know.\""),
 ]
-REFERENCE_PROMPT = "The quick brown fox jumps over the lazy dog."
+
+COMPACT_AUDIO_CSS = """
+.compact-audio {
+    min-height: 82px !important;
+}
+.compact-audio .audio-container {
+    height: 58px !important;
+    min-height: 58px !important;
+}
+.compact-audio .component-wrapper {
+    padding: 2px 8px !important;
+}
+"""
 
 
 def get_device_label() -> str:
@@ -66,10 +78,6 @@ def use_example_text(example_text: str) -> str:
         if example_text == label:
             return value
     return example_text or ""
-
-
-def use_ref_text_mode(use_asr: bool):
-    return gr.update(interactive=not use_asr)
 
 
 def make_temp_file(suffix: str) -> str:
@@ -109,6 +117,7 @@ def create_spectrogram(audio_path: str, title: str) -> str:
     ax.set_title(title)
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Frequency (Hz)")
+    ax.set_ylim(0, min(8000, sample_rate / 2))
     fig.colorbar(image, ax=ax, label="Power (dB)")
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)
@@ -126,115 +135,131 @@ def load_f5tts() -> F5TTS:
     return f5tts
 
 
+def delete_reference_files(reference_audio: str, processed_ref_audio: str | None) -> None:
+    """Delete Gradio's recording and F5-TTS's processed temp copy."""
+    paths: set[Path] = set()
+    if processed_ref_audio:
+        processed_path = Path(processed_ref_audio).resolve()
+        if processed_path != Path(reference_audio).resolve():
+            paths.add(processed_path)
+
+    gradio_temp_root = Path(
+        os.environ.get("GRADIO_TEMP_DIR", Path(tempfile.gettempdir()) / "gradio")
+    ).resolve()
+    reference_path = Path(reference_audio).resolve()
+    if reference_path.is_relative_to(gradio_temp_root):
+        paths.add(reference_path)
+
+    failures: list[str] = []
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+            if path.exists():
+                failures.append(f"{path}: file still exists")
+        except OSError as error:
+            failures.append(f"{path}: {error}")
+
+    if failures:
+        raise RuntimeError("Could not delete reference audio:\n" + "\n".join(failures))
+
+
 def clone_with_f5(
     reference_audio: str,
-    reference_text: str,
-    use_asr: bool,
     trim_generated_silence: bool,
     gen_text: str,
-) -> tuple[str, str, str, str]:
+) -> tuple[None, str, str, str]:
     if not reference_audio:
-        raise gr.Error("Upload or record a reference audio clip first.")
+        raise gr.Error("Record a reference audio clip first.")
     if not gen_text or not gen_text.strip():
         raise gr.Error("Enter text to synthesize.")
 
-    model = load_f5tts()
-
-    ref_text = reference_text.strip()
-    if not use_asr and not ref_text:
-        raise gr.Error("Provide the reference transcript or enable ASR.")
-
-    processed_ref_audio = reference_audio
-    detected_ref_text = ref_text
-    if use_asr:
+    processed_ref_audio: str | None = None
+    try:
+        model = load_f5tts()
         processed_ref_audio, detected_ref_text = preprocess_ref_audio_text(reference_audio, "")
-    else:
-        processed_ref_audio, detected_ref_text = preprocess_ref_audio_text(reference_audio, ref_text)
-    reference_spectrogram_path = create_spectrogram(processed_ref_audio, "Reference Audio Spectrogram")
+        reference_spectrogram_path = create_spectrogram(processed_ref_audio, "Reference Audio Spectrogram")
 
-    wav_path = make_temp_file(".wav")
+        wav_path = make_temp_file(".wav")
 
-    model.infer(
-        ref_file=processed_ref_audio,
-        ref_text=detected_ref_text,
-        gen_text=gen_text.strip(),
-        remove_silence=trim_generated_silence,
-        file_wave=wav_path,
-    )
-    generated_spectrogram_path = create_spectrogram(wav_path, "Generated Audio Spectrogram")
+        model.infer(
+            ref_file=processed_ref_audio,
+            ref_text=detected_ref_text,
+            gen_text=gen_text.strip(),
+            remove_silence=trim_generated_silence,
+            file_wave=wav_path,
+        )
+        generated_spectrogram_path = create_spectrogram(wav_path, "Generated Audio Spectrogram")
 
-    return wav_path, reference_spectrogram_path, generated_spectrogram_path, detected_ref_text
+        # Returning None clears the deleted reference recording from the UI.
+        return None, wav_path, reference_spectrogram_path, generated_spectrogram_path
+    finally:
+        delete_reference_files(reference_audio, processed_ref_audio)
 
 
 def build_app() -> gr.Blocks:
-    with gr.Blocks(title="F5-TTS Voice Cloning Demo") as demo:
+    with gr.Blocks(title="F5-TTS Voice Cloning Demo", css=COMPACT_AUDIO_CSS) as demo:
         gr.Markdown(
             """
             # F5-TTS Voice Cloning Demo
-            Upload or record a short reference clip, optionally auto-transcribe it, then synthesize new text with F5-TTS.
+            **Please read aloud:** “The quick brown fox jumps over the lazy dog.”
             """
         )
-        gr.Markdown(f"Device: `{get_device_label()}`")
-        gr.Markdown(f"Reference reading prompt: `{REFERENCE_PROMPT}`")
 
         with gr.Row():
             reference_audio = gr.Audio(
-                sources=["upload", "microphone"],
+                sources=["microphone"],
                 type="filepath",
-                label="Reference Voice",
+                label="Record Reference Voice",
+                interactive=True,
+                waveform_options={"show_recording_waveform": False},
+                elem_classes="compact-audio",
             )
             output_audio = gr.Audio(
                 type="filepath",
                 label="Generated Audio",
+                interactive=False,
+                waveform_options={"show_recording_waveform": False},
+                elem_classes="compact-audio",
             )
+
+        with gr.Row():
+            gen_text = gr.Textbox(
+                label="Text to Generate",
+                lines=2,
+                value=TEXT_EXAMPLES[0][1],
+                scale=2,
+            )
+            text_examples = gr.Dropdown(
+                choices=[label for label, _ in TEXT_EXAMPLES],
+                value=TEXT_EXAMPLES[0][0],
+                label="Preset Text Examples",
+                allow_custom_value=False,
+                scale=1,
+            )
+
+        with gr.Row():
+            trim_generated_silence = gr.Checkbox(
+                value=True,
+                label="Trim Generated Silence",
+            )
+            generate = gr.Button("Generate", variant="primary")
 
         with gr.Row():
             reference_spectrogram = gr.Image(
                 type="filepath",
-                label="Reference Spectrogram",
+                label="Reference Spectrogram (0–8 kHz)",
+                height=240,
+                show_download_button=False,
+                show_fullscreen_button=False,
             )
             spectrogram = gr.Image(
                 type="filepath",
-                label="Generated Spectrogram",
+                label="Generated Spectrogram (0–8 kHz)",
+                height=240,
+                show_download_button=False,
+                show_fullscreen_button=False,
             )
 
-        use_asr = gr.Checkbox(
-            value=True,
-            label="Auto-Transcribe Reference",
-        )
-        trim_generated_silence = gr.Checkbox(
-            value=True,
-            label="Trim Generated Silence",
-        )
-        reference_text = gr.Textbox(
-            label="Reference Transcript",
-            lines=3,
-            placeholder="Leave empty if Auto-Transcribe Reference is enabled.",
-            interactive=False,
-        )
-        detected_ref_text = gr.Textbox(
-            label="Detected Reference Transcript",
-            lines=3,
-            interactive=False,
-        )
-        gen_text = gr.Textbox(
-            label="Text",
-            lines=4,
-            value=TEXT_EXAMPLES[0][1],
-        )
-        text_examples = gr.Dropdown(
-            choices=[label for label, _ in TEXT_EXAMPLES],
-            value=TEXT_EXAMPLES[0][0],
-            label="Preset Text Examples",
-            allow_custom_value=False,
-        )
-        generate = gr.Button("Generate", variant="primary")
-
-        use_asr.change(
-            fn=use_ref_text_mode,
-            inputs=use_asr,
-            outputs=reference_text,
-        )
         text_examples.change(
             fn=use_example_text,
             inputs=text_examples,
@@ -243,8 +268,8 @@ def build_app() -> gr.Blocks:
 
         generate.click(
             fn=clone_with_f5,
-            inputs=[reference_audio, reference_text, use_asr, trim_generated_silence, gen_text],
-            outputs=[output_audio, reference_spectrogram, spectrogram, detected_ref_text],
+            inputs=[reference_audio, trim_generated_silence, gen_text],
+            outputs=[reference_audio, output_audio, reference_spectrogram, spectrogram],
         )
 
     return demo

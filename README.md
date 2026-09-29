@@ -1,9 +1,9 @@
 # F5-TTS Voice Cloning Demo
 
 A small Gradio interface for zero-shot voice cloning with
-[F5-TTS](https://github.com/SWivid/F5-TTS). Upload or record a short reference
-clip, optionally transcribe it automatically, and synthesize new text in the
-reference voice.
+[F5-TTS](https://github.com/SWivid/F5-TTS). Record a short reference clip and
+synthesize new text in the reference voice. The recording is transcribed
+automatically and deleted after generation.
 
 Only use audio you own or have permission to use. Do not use generated speech
 to impersonate, deceive, or harm anyone.
@@ -26,12 +26,19 @@ computer:
 ssh -L 7861:localhost:7861 USER@SERVER
 ```
 
-Then open <http://127.0.0.1:7861> locally. Alternatively, ask Gradio for a
-temporary public URL:
+Then open <http://127.0.0.1:7861> locally.
+
+### Public Gradio link (`share=True`)
+
+To enable Gradio sharing and create a temporary public URL, run:
 
 ```bash
 SHARE=1 python app_f5.py
 ```
+
+The app reads `SHARE=1` and passes `share=True` to Gradio. The terminal will
+print a public `https://...gradio.live` URL. Anyone with that URL can access the
+app while the process is running, so share it carefully.
 
 Use a different port with `PORT=9000 python app_f5.py`.
 
